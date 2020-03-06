@@ -1,0 +1,232 @@
+---
+title: "ESM244 Lab 9"
+author: "Anna Abelman"
+date: "3/4/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+
+library(devtools)
+library(tidyverse)
+library(here)
+library(boot)
+library(gt)
+library(patchwork)
+library(broom)
+library(nlstools)
+```
+
+#### Fun tables with `gt`
+
+LifeCycleSavings Data (see ?LifeCycleSavings)
+
+```{r}
+#convert rownames into columns
+disp_income <- LifeCycleSavings %>% 
+  rownames_to_column() %>% 
+  arrange(dpi) %>% #rearranges the structure of the dataframe
+  head(5) %>% 
+  mutate(ddpi = ddpi / 100, #converting percents to decimals
+         pop15 = pop15 / 100,
+         pop75 = pop75 / 100)
+```
+
+Now let's make a nicer table with `gt`
+ - use GitHub page for help
+ 
+```{r}
+#should have an overall summary table already before starting
+disp_income %>% 
+  gt() %>% 
+  tab_header(
+    title = "Life Cycle Savings",
+    subtitle = "5 countries with lowest per capita disposable income"
+  ) %>% 
+  fmt_currency( #change the format: like currency, scientific notations
+    columns = vars(dpi),
+    decimals = 2
+  ) %>% 
+  fmt_percent(
+    columns = vars(pop15, pop75, ddpi),
+    decimals = 1
+  ) %>% 
+  tab_options( 
+     table.width = pct(100)
+   ) %>% 
+  tab_footnote(
+    footnote = "Data average from 1970-1980",
+    location = cells_title()
+  ) %>% 
+  data_color(
+    columns = vars(dpi),
+    colors = scales::col_numeric(
+      palette = c("gold", "orange", "red"),
+      domain = c(88, 190) #changes the range of colors; #s not in range will appear in dark grey
+    )
+  ) %>% 
+  cols_label(
+    sr = "Savings Ratio"
+  )
+  
+```
+ 
+#### Bootstrap the confidence interval for salinity
+ - to see all boot and R built in data sets, in console `data()`
+ 
+```{r}
+hist(salinity$sal) # look to see if normally distribution
+ggplot(data = salinity, aes(sample = sal))+
+  geom_qq() #close to linear but not exactly
+
+#if i believe based on a single sample of n = 28 that a t-distribution describes the sample distribution. So i'll use:
+
+t.test(salinity$sal)
+
+#but i really want to compare this by using bootstrapping to find a sampling distribution based on my data, instead of based entirely on assumptions
+```
+
+Create a function to calculate the mean of different bootstrap samples
+```{r}
+mean_fun <- function(x,i){
+  mean(x[i])
+}
+
+#get sal a vector on its own to use for boostrapping:
+sal_nc <- salinity$sal
+
+set.seed(5002) #to keep the same for collaboration
+#double check with different seeds to see if results keep
+
+#to bootstrap this:
+sal_boot_100 <- boot(data = sal_nc,
+                     statistic = mean_fun,
+                     R = 100)
+
+sal_boot_10k <- boot(data = sal_nc,
+                     statistic = mean_fun,
+                     R = 10000)
+
+#call them to see the original estimate, the biased, and the standard error
+
+#to see the means that were calculated by sal_boot_100$t
+
+#make a dataframe of all mean values (100) for ggplot
+salboot_100_df <- data.frame(bs_mean = sal_boot_100$t)
+salboot_10k_df <- data.frame(bs_mean = sal_boot_10k$t)
+
+#Now let's plot the bootstrapped sampling distribution:
+p1 <- ggplot(data = salinity, aes(x = sal))+
+  geom_histogram(fill = "skyblue")+
+  theme_minimal()
+p1
+
+p2 <- ggplot(data = salboot_100_df, aes(x = bs_mean))+
+  geom_histogram(fill = "skyblue")+
+  theme_minimal()
+p2
+
+p3 <- ggplot(data = salboot_10k_df, aes(x = bs_mean))+
+  geom_histogram(fill = "skyblue")+
+  theme_minimal()
+p3
+
+p1 + p2 + p3
+
+(p1 + p2) / p3
+
+```
+ - use information about this distribution (showing a normal distribution), instead of making assumptions
+ 
+ #### OK back to bootstrapping...
+
+So now we have a sampling distribution based on means calculated from a large number of bootstrap samples, and we can use *this* sampling distribution (instead of one based on assumptions for our single sample) to find the confidence interval. 
+
+```{r}
+boot.ci(sal_boot_10k, conf = 0.95)
+```
+
+#### Example of Non-linear Least Squares
+
+```{r}
+df <- read_csv(here("data", "log_growth.csv"))
+
+ggplot(data = df, aes(x = time, y = pop))+
+  geom_point()
+
+ggplot(data = df, aes(x = time, y = log(pop)))+
+  geom_point()
+```
+
+Recall: 
+
+$P(t)=\frac{K}{1+Ae^{-kt}}$, where
+
+- $K$ is the carrying capacity
+- $A$ is $\frac{K-P_0}{P_0}$
+- $k$ is the growth rate constant
+
+```{r}
+df_exp <- df %>% 
+  filter(time < 15) %>% 
+  mutate(ln_pop = log(pop))
+
+lm_k <- lm(ln_pop ~ time, data = df_exp)
+
+lm_k
+#gives us the initial estimate of the growth rate coefficient
+#estimate: r = 0.17
+#K = 180
+#A = 18
+```
+
+Now, NLS:
+```{r}
+#can assign any reasonable equation
+#must give it a starting point (which is why we did the lm above and looked at the graph initially)
+df_nls <- nls(pop ~ K/(1 + A*exp(-r*time)),
+              data = df,
+              start = list(K = 180,
+                           A = 18,
+                           r = 0.17),
+              trace = TRUE)
+
+#left column: sum of the squares of the residuals because its minimizing the distance of the residuals 
+
+summary(df_nls)
+
+model_out <- broom::tidy(df_nls)
+model_out
+```
+
+```{r}
+t_seq <- seq(from = 0, to = 35, length = 200)
+
+#now make predictions from our NLS mode, using that new sequence of times:
+
+p_predict <- predict(df_nls, newdata = t_seq)
+
+#bind together my time and prediction data:
+df_complete <- data.frame(df, p_predict)
+
+ggplot(data = df_complete, aes(x = time, y = pop))+
+  geom_point()+
+  geom_line(aes(x = time, y = p_predict), color = "red")+
+  theme_minimal()
+```
+
+```{r}
+df_ci <- confint2(df_nls)
+df_ci
+```
+
+
+
+
+
+
+
+
